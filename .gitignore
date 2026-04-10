@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.claude/
+
+*.wav
+*.csv
+*_assessment.json
+
+batch_assessment/
