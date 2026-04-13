@@ -1,12 +1,29 @@
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
 .venv/
 venv/
-.claude/
 
+# Environment
+.env
+
+# IDE
+.claude/
+.vscode/
+.idea/
+
+# Data files
 *.wav
+*.mp3
 *.csv
 *_assessment.json
 
-batch_assessment/
+# Data directories
+data/audio/
+data/results/
+data/batch_assessment/
+
+# Temp files
+*.tmp
+.DS_Store
