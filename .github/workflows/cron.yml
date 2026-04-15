@@ -2,8 +2,8 @@ name: Pronunciation Assessment Cron
 
 on:
   schedule:
-    # Runs every hour
-    - cron: '0 * * * *'
+    # Runs daily at 05:00 UTC
+    - cron: '0 5 * * *'
   workflow_dispatch:  # Allows manual trigger
 
 jobs:
