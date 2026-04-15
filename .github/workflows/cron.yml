@@ -1,0 +1,31 @@
+name: Pronunciation Assessment Cron
+
+on:
+  schedule:
+    # Runs every hour
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  assess:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pronunciation assessment
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TEST_RESULTS_TABLE_ID: ${{ secrets.AIRTABLE_TEST_RESULTS_TABLE_ID }}
+          RENDI_API_KEY: ${{ secrets.RENDI_API_KEY }}
+        run: python cron.py --batch-size 50
