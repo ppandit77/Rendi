@@ -28,4 +28,4 @@ jobs:
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TEST_RESULTS_TABLE_ID: ${{ secrets.AIRTABLE_TEST_RESULTS_TABLE_ID }}
           RENDI_API_KEY: ${{ secrets.RENDI_API_KEY }}
-        run: python cron.py --batch-size 50
+        run: python cron.py --batch-size 200
