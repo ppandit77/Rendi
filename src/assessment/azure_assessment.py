@@ -4,10 +4,18 @@ Azure AI Speech Pronunciation Assessment Module.
 Uses Azure's Speech SDK for pronunciation assessment.
 """
 
+import logging
 import time
-import azure.cognitiveservices.speech as speechsdk
+try:
+    import azure.cognitiveservices.speech as speechsdk
+except ImportError:
+    speechsdk = None
 
 from ..config import AZURE_SPEECH_KEY, AZURE_SPEECH_REGION
+from ..utils.logging_utils import build_error_result
+
+
+logger = logging.getLogger(__name__)
 
 
 def assess_pronunciation_azure(
@@ -32,123 +40,156 @@ def assess_pronunciation_azure(
     region = speech_region or AZURE_SPEECH_REGION
 
     if not key:
-        return {"error": "Azure Speech API key not configured"}
+        return build_error_result(
+            "Azure Speech API key not configured",
+            stage="configuration",
+            audio_file=audio_file,
+            language=language,
+        )
+    if speechsdk is None:
+        return build_error_result(
+            "azure-cognitiveservices-speech is not installed",
+            stage="configuration",
+            audio_file=audio_file,
+            language=language,
+        )
 
-    # Configure speech service
-    speech_config = speechsdk.SpeechConfig(
-        subscription=key,
-        region=region
-    )
-    speech_config.speech_recognition_language = language
+    try:
+        # Configure speech service
+        speech_config = speechsdk.SpeechConfig(
+            subscription=key,
+            region=region
+        )
+        speech_config.speech_recognition_language = language
 
-    # Configure audio input from file
-    audio_config = speechsdk.audio.AudioConfig(filename=audio_file)
+        # Configure audio input from file
+        audio_config = speechsdk.audio.AudioConfig(filename=audio_file)
 
-    # Configure pronunciation assessment WITHOUT reference text
-    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
-        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
-        granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
-    )
+        # Configure pronunciation assessment WITHOUT reference text
+        pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+            grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+            granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
+        )
 
-    # Enable prosody assessment
-    pronunciation_config.enable_prosody_assessment()
+        # Enable prosody assessment
+        pronunciation_config.enable_prosody_assessment()
 
-    # Create speech recognizer
-    speech_recognizer = speechsdk.SpeechRecognizer(
-        speech_config=speech_config,
-        audio_config=audio_config
-    )
+        # Create speech recognizer
+        speech_recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config
+        )
 
-    # Apply pronunciation assessment config
-    pronunciation_config.apply_to(speech_recognizer)
+        # Apply pronunciation assessment config
+        pronunciation_config.apply_to(speech_recognizer)
 
-    # Storage for results
-    all_words = []
-    all_scores = []
-    all_text = []
-    done = False
-    error_message = None
+        # Storage for results
+        all_words = []
+        all_scores = []
+        all_text = []
+        done = False
+        error_message = None
 
-    def on_recognized(evt):
-        if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            pronunciation_result = speechsdk.PronunciationAssessmentResult(evt.result)
+        def on_recognized(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                pronunciation_result = speechsdk.PronunciationAssessmentResult(evt.result)
 
-            segment_scores = {
-                "accuracy": pronunciation_result.accuracy_score,
-                "fluency": pronunciation_result.fluency_score,
-                "pronunciation": pronunciation_result.pronunciation_score,
-            }
-
-            # Try to get prosody score
-            try:
-                segment_scores["prosody"] = pronunciation_result.prosody_score
-            except AttributeError:
-                pass
-
-            all_scores.append(segment_scores)
-            all_text.append(evt.result.text)
-
-            # Get word-level details
-            for word in pronunciation_result.words:
-                word_info = {
-                    "word": word.word,
-                    "accuracy_score": word.accuracy_score,
-                    "error_type": str(word.error_type) if hasattr(word, 'error_type') else "None"
+                segment_scores = {
+                    "accuracy": pronunciation_result.accuracy_score,
+                    "fluency": pronunciation_result.fluency_score,
+                    "pronunciation": pronunciation_result.pronunciation_score,
                 }
-                all_words.append(word_info)
 
-    def on_session_stopped(evt):
-        nonlocal done
-        done = True
+                # Try to get prosody score
+                try:
+                    segment_scores["prosody"] = pronunciation_result.prosody_score
+                except AttributeError:
+                    pass
 
-    def on_canceled(evt):
-        nonlocal done, error_message
-        done = True
-        if evt.result.reason == speechsdk.ResultReason.Canceled:
-            cancellation = evt.result.cancellation_details
-            if cancellation.reason == speechsdk.CancellationReason.Error:
-                error_message = f"Error: {cancellation.error_details}"
+                all_scores.append(segment_scores)
+                all_text.append(evt.result.text)
 
-    # Connect event handlers
-    speech_recognizer.recognized.connect(on_recognized)
-    speech_recognizer.session_stopped.connect(on_session_stopped)
-    speech_recognizer.canceled.connect(on_canceled)
+                # Get word-level details
+                for word in pronunciation_result.words:
+                    word_info = {
+                        "word": word.word,
+                        "accuracy_score": word.accuracy_score,
+                        "error_type": str(word.error_type) if hasattr(word, 'error_type') else "None"
+                    }
+                    all_words.append(word_info)
 
-    # Start continuous recognition
-    speech_recognizer.start_continuous_recognition()
+        def on_session_stopped(evt):
+            nonlocal done
+            done = True
 
-    # Wait for completion
-    while not done:
-        time.sleep(0.5)
+        def on_canceled(evt):
+            nonlocal done, error_message
+            done = True
+            if evt.result.reason == speechsdk.ResultReason.Canceled:
+                cancellation = evt.result.cancellation_details
+                if cancellation.reason == speechsdk.CancellationReason.Error:
+                    error_message = f"Error: {cancellation.error_details}"
 
-    speech_recognizer.stop_continuous_recognition()
+        # Connect event handlers
+        speech_recognizer.recognized.connect(on_recognized)
+        speech_recognizer.session_stopped.connect(on_session_stopped)
+        speech_recognizer.canceled.connect(on_canceled)
 
-    # Check for errors
-    if error_message:
-        return {"error": error_message}
+        # Start continuous recognition
+        speech_recognizer.start_continuous_recognition()
 
-    if not all_scores:
-        return {"error": "No speech could be recognized in the audio"}
+        # Wait for completion
+        while not done:
+            time.sleep(0.5)
 
-    # Calculate average scores
-    avg_scores = {}
-    score_keys = ["accuracy", "fluency", "pronunciation", "prosody"]
-    for key in score_keys:
-        values = [s[key] for s in all_scores if key in s]
-        if values:
-            avg_scores[key] = sum(values) / len(values)
+        speech_recognizer.stop_continuous_recognition()
 
-    # Calculate final score
-    valid_scores = list(avg_scores.values())
-    final_score = sum(valid_scores) / len(valid_scores) if valid_scores else None
+        # Check for errors
+        if error_message:
+            logger.error("Azure speech assessment canceled for %s: %s", audio_file, error_message)
+            return build_error_result(
+                error_message,
+                stage="azure_recognition",
+                audio_file=audio_file,
+                language=language,
+            )
 
-    return {
-        "transcription": " ".join(all_text),
-        "scores": avg_scores,
-        "words": all_words,
-        "final_score": final_score,
-        "segment_count": len(all_scores)
-    }
+        if not all_scores:
+            return build_error_result(
+                "No speech could be recognized in the audio",
+                stage="azure_recognition",
+                audio_file=audio_file,
+                language=language,
+            )
+
+        # Calculate average scores
+        avg_scores = {}
+        score_keys = ["accuracy", "fluency", "pronunciation", "prosody"]
+        for key in score_keys:
+            values = [s[key] for s in all_scores if key in s]
+            if values:
+                avg_scores[key] = sum(values) / len(values)
+
+        # Calculate final score
+        valid_scores = list(avg_scores.values())
+        final_score = sum(valid_scores) / len(valid_scores) if valid_scores else None
+
+        return {
+            "transcription": " ".join(all_text),
+            "scores": avg_scores,
+            "words": all_words,
+            "final_score": final_score,
+            "segment_count": len(all_scores)
+        }
+    except Exception as e:
+        logger.exception("Azure pronunciation assessment failed for %s", audio_file)
+        return build_error_result(
+            str(e),
+            error=e,
+            stage="azure_assessment",
+            audio_file=audio_file,
+            language=language,
+        )
 
 
 def print_assessment(assessment: dict):

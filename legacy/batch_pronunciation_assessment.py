@@ -16,12 +16,19 @@ import os
 import sys
 import json
 import time
-import base64
-import requests
+import logging
 import re
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from openai import OpenAI
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from src.assessment.openai_assessment import assess_pronunciation_openai as assess_pronunciation_openai_shared
+from src.utils.audio_converter import convert_video_to_audio_rendi_with_details
+from src.utils.logging_utils import log_error_result, setup_logging
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +48,8 @@ DEFAULT_CSV_PATH = os.getenv("BATCH_ASSESSMENT_CSV", os.path.join(PROJECT_ROOT, 
 # Create directories
 os.makedirs(AUDIO_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+logger = setup_logging(__name__)
 
 
 def parse_date(date_str):
@@ -157,84 +166,22 @@ def download_video(url, output_path):
 def convert_video_to_audio_rendi(video_url, output_audio_path):
     """
     Convert video to audio using Rendi API (FFmpeg-as-a-service).
-    Uses the same API format as extract_audio.py
+    Delegates to the shared converter so failures retain structured context.
     """
-    try:
-        headers = {
-            "X-API-KEY": RENDI_API_KEY,
-            "Content-Type": "application/json"
-        }
+    conversion_result = convert_video_to_audio_rendi_with_details(video_url, output_audio_path)
+    if conversion_result["ok"]:
+        print(f"  Audio saved: {output_audio_path}")
+        return conversion_result
 
-        # FFmpeg command for Azure Speech API compatible audio
-        payload = {
-            "input_files": {
-                "in_1": video_url
-            },
-            "output_files": {
-                "out_1": "output.wav"
-            },
-            "ffmpeg_command": "-i {{in_1}} -ar 16000 -ac 1 -acodec pcm_s16le {{out_1}}"
-        }
+    print(f"  Error: {conversion_result.get('error', 'Conversion failed')}")
+    print("  Falling back to local FFmpeg conversion...")
+    fallback_result = convert_video_to_audio_local(video_url, output_audio_path)
+    if fallback_result["ok"]:
+        return fallback_result
 
-        # Submit job
-        print(f"  Submitting to Rendi API...")
-        response = requests.post(RENDI_API_URL, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        job_data = response.json()
-        command_id = job_data.get("command_id")
-
-        if not command_id:
-            print(f"  Error: No command_id returned")
-            return False
-
-        print(f"  Rendi job started: {command_id}")
-
-        # Poll for completion
-        status_url = f"{RENDI_STATUS_URL}/{command_id}"
-        for _ in range(60):  # Max 5 minutes
-            time.sleep(3)
-            status_response = requests.get(status_url, headers=headers, timeout=30)
-            status_response.raise_for_status()
-            status_data = status_response.json()
-            status = status_data.get("status")
-
-            if status == "SUCCESS":
-                # Download the output file
-                output_files = status_data.get("output_files", {})
-                out_file_info = output_files.get("out_1")
-
-                if not out_file_info:
-                    print(f"  Error: No output file in response")
-                    return False
-
-                download_url = out_file_info.get("storage_url") if isinstance(out_file_info, dict) else out_file_info
-
-                if not download_url:
-                    print(f"  Error: No download URL found")
-                    return False
-
-                audio_response = requests.get(download_url, timeout=60)
-                audio_response.raise_for_status()
-
-                with open(output_audio_path, 'wb') as f:
-                    f.write(audio_response.content)
-
-                print(f"  Audio saved: {output_audio_path}")
-                return True
-
-            elif status == "FAILED":
-                error = status_data.get("error", "Unknown error")
-                print(f"  Error: Job failed - {error}")
-                return False
-
-            print(f"    Status: {status}...")
-
-        print(f"  Error: Job timed out")
-        return False
-
-    except Exception as e:
-        print(f"  Error with Rendi API: {e}")
-        return convert_video_to_audio_local(video_url, output_audio_path)
+    fallback_result.setdefault("error_context", {})
+    fallback_result["error_context"]["rendi_failure"] = conversion_result
+    return fallback_result
 
 
 def convert_video_to_audio_local(video_url, output_audio_path):
@@ -246,7 +193,13 @@ def convert_video_to_audio_local(video_url, output_audio_path):
         temp_video = output_audio_path.replace('.wav', '_temp.webm')
 
         if not download_video(video_url, temp_video):
-            return False
+            return {
+                "ok": False,
+                "error": "Download failed before local conversion",
+                "error_stage": "download_video",
+                "error_type": "DownloadFailed",
+                "error_context": {"video_url": video_url, "temp_video": temp_video},
+            }
 
         # Convert with ffmpeg
         import subprocess
@@ -262,110 +215,40 @@ def convert_video_to_audio_local(video_url, output_audio_path):
 
         if result.returncode == 0:
             print(f"  Audio converted: {output_audio_path}")
-            return True
+            return {
+                "ok": True,
+                "output_audio_path": output_audio_path,
+                "conversion_method": "local_ffmpeg",
+            }
         else:
             print(f"  FFmpeg error: {result.stderr[:200]}")
-            return False
+            return {
+                "ok": False,
+                "error": "FFmpeg conversion failed",
+                "error_stage": "local_ffmpeg",
+                "error_type": "FFmpegFailed",
+                "error_context": {
+                    "video_url": video_url,
+                    "output_audio_path": output_audio_path,
+                    "stderr": result.stderr[:1000],
+                    "returncode": result.returncode,
+                },
+            }
 
     except Exception as e:
         print(f"  Error in local conversion: {e}")
-        return False
+        return {
+            "ok": False,
+            "error": f"Error in local conversion: {e}",
+            "error_stage": "local_ffmpeg",
+            "error_type": type(e).__name__,
+            "error_context": {"video_url": video_url, "output_audio_path": output_audio_path},
+        }
 
 
 def assess_pronunciation_openai(audio_file, language="en-US"):
     """Run OpenAI pronunciation assessment on audio file."""
-
-    ASSESSMENT_PROMPT = """You are an expert pronunciation assessor and speech language pathologist. Analyze this audio recording and provide a detailed pronunciation assessment.
-
-The speaker's target language is: {language}
-
-Evaluate the speaker on these dimensions using a 0-100 scale:
-
-1. ACCURACY (0-100): How correctly individual phonemes and words are pronounced
-2. FLUENCY (0-100): Speech flow, pace, hesitations, and naturalness
-3. PRONUNCIATION (0-100): Overall pronunciation quality combining clarity and correctness
-4. PROSODY (0-100): Rhythm, stress patterns, and intonation
-
-Also identify specific words that were mispronounced or unclear.
-
-Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
-{{
-  "transcription": "full transcription of what was said",
-  "scores": {{
-    "accuracy": <number 0-100>,
-    "fluency": <number 0-100>,
-    "pronunciation": <number 0-100>,
-    "prosody": <number 0-100>
-  }},
-  "words": [
-    {{"word": "problematic_word", "accuracy_score": <number 0-100>, "error_type": "Mispronunciation"}}
-  ],
-  "assessment_notes": "brief notes on pronunciation patterns observed"
-}}
-
-IMPORTANT:
-- Only include words in the "words" array that have pronunciation issues (accuracy_score < 80)
-- If all words are pronounced well, the "words" array can be empty
-- Scores should reflect realistic assessment - perfect 100s are rare"""
-
-    try:
-        # Read and encode audio
-        with open(audio_file, "rb") as f:
-            audio_data = f.read()
-
-        audio_base64 = base64.standard_b64encode(audio_data).decode("utf-8")
-
-        # Get file extension
-        ext = audio_file.lower().rsplit(".", 1)[-1]
-
-        # Initialize OpenAI client
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        # Call GPT-4o with audio
-        response = client.chat.completions.create(
-            model="gpt-4o-audio-preview",
-            modalities=["text"],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": ASSESSMENT_PROMPT.format(language=language)
-                        },
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": audio_base64,
-                                "format": ext if ext in ["wav", "mp3"] else "wav"
-                            }
-                        }
-                    ]
-                }
-            ],
-            temperature=0.3
-        )
-
-        response_text = response.choices[0].message.content
-
-        # Parse JSON
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0]
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0]
-
-        result = json.loads(response_text.strip())
-
-        # Calculate final score
-        scores = result.get("scores", {})
-        valid_scores = [v for v in scores.values() if isinstance(v, (int, float))]
-        if valid_scores:
-            result["final_score"] = sum(valid_scores) / len(valid_scores)
-
-        return result
-
-    except Exception as e:
-        return {"error": str(e)}
+    return assess_pronunciation_openai_shared(audio_file, language)
 
 
 def safe_filename(name):
@@ -441,65 +324,96 @@ def main():
             results.append(result_data)
             continue
 
-        # Step 1: Convert video to audio
-        if not args.skip_conversion or not os.path.exists(audio_path):
-            print(f"  Converting video to audio...")
-            success = convert_video_to_audio_rendi(entry['url'], audio_path)
-            if not success:
-                print(f"  Skipping due to conversion failure")
-                result_data = {
-                    'index': i,
-                    'name': entry['name'],
-                    'url': entry['url'],
-                    'existing_score': entry['existing_score'],
-                    'error': 'Conversion failed'
-                }
-                results.append(result_data)
-                continue
+        try:
+            # Step 1: Convert video to audio
+            if not args.skip_conversion or not os.path.exists(audio_path):
+                print(f"  Converting video to audio...")
+                conversion_result = convert_video_to_audio_rendi(entry['url'], audio_path)
+                if not conversion_result["ok"]:
+                    print(f"  Skipping due to conversion failure")
+                    result_data = {
+                        'index': i,
+                        'name': entry['name'],
+                        'url': entry['url'],
+                        'existing_score': entry['existing_score'],
+                        'is_xobin': entry['is_xobin'],
+                        'error': conversion_result.get('error', 'Conversion failed'),
+                        'error_stage': conversion_result.get('error_stage', 'convert_video_to_audio'),
+                        'error_type': conversion_result.get('error_type', 'ConversionError'),
+                        'error_context': conversion_result.get('error_context', {}),
+                    }
+                    with open(result_path, 'w') as f:
+                        json.dump(result_data, f, indent=2)
+                    log_error_result(logger, "Batch entry failed", result_data)
+                    results.append(result_data)
+                    continue
 
-        # Step 2: Run pronunciation assessment
-        print(f"  Running OpenAI assessment...")
-        assessment = assess_pronunciation_openai(audio_path)
+            # Step 2: Run pronunciation assessment
+            print(f"  Running OpenAI assessment...")
+            assessment = assess_pronunciation_openai(audio_path)
 
-        # Compile result
-        result_data = {
-            'index': i,
-            'name': entry['name'],
-            'url': entry['url'],
-            'existing_score': entry['existing_score'],
-            'is_xobin': entry['is_xobin'],
-            'assessment': assessment
-        }
+            # Compile result
+            result_data = {
+                'index': i,
+                'name': entry['name'],
+                'url': entry['url'],
+                'existing_score': entry['existing_score'],
+                'is_xobin': entry['is_xobin'],
+                'assessment': assessment
+            }
 
-        # Calculate comparison
-        if 'error' not in assessment and 'final_score' in assessment:
-            result_data['openai_final_score'] = assessment['final_score']
-            result_data['score_difference'] = assessment['final_score'] - entry['existing_score']
+            if 'error' in assessment:
+                result_data['error'] = assessment.get('error', 'Unknown error')
+                result_data['error_stage'] = assessment.get('error_stage', 'assess_pronunciation')
+                result_data['error_type'] = assessment.get('error_type', 'AssessmentError')
+                result_data['error_context'] = assessment.get('error_context', {})
 
-        # Save individual result
-        with open(result_path, 'w') as f:
-            json.dump(result_data, f, indent=2)
+            # Calculate comparison
+            if 'error' not in assessment and 'final_score' in assessment:
+                result_data['openai_final_score'] = assessment['final_score']
+                result_data['score_difference'] = assessment['final_score'] - entry['existing_score']
 
-        results.append(result_data)
+            # Save individual result
+            with open(result_path, 'w') as f:
+                json.dump(result_data, f, indent=2)
 
-        # Print summary
-        if 'error' not in assessment:
-            scores = assessment.get('scores', {})
-            print(f"  OpenAI Scores:")
-            print(f"    Accuracy:      {scores.get('accuracy', 'N/A')}")
-            print(f"    Fluency:       {scores.get('fluency', 'N/A')}")
-            print(f"    Pronunciation: {scores.get('pronunciation', 'N/A')}")
-            print(f"    Prosody:       {scores.get('prosody', 'N/A')}")
-            print(f"    Final Score:   {assessment.get('final_score', 'N/A'):.1f}")
-            print(f"  Existing Score:  {entry['existing_score']}")
-            if 'score_difference' in result_data:
-                diff = result_data['score_difference']
-                print(f"  Difference:      {diff:+.1f} ({'higher' if diff > 0 else 'lower'})")
-        else:
-            print(f"  Error: {assessment.get('error', 'Unknown')}")
+            results.append(result_data)
 
-        # Small delay to avoid rate limiting
-        time.sleep(1)
+            # Print summary
+            if 'error' not in assessment:
+                scores = assessment.get('scores', {})
+                print(f"  OpenAI Scores:")
+                print(f"    Accuracy:      {scores.get('accuracy', 'N/A')}")
+                print(f"    Fluency:       {scores.get('fluency', 'N/A')}")
+                print(f"    Pronunciation: {scores.get('pronunciation', 'N/A')}")
+                print(f"    Prosody:       {scores.get('prosody', 'N/A')}")
+                print(f"    Final Score:   {assessment.get('final_score', 'N/A'):.1f}")
+                print(f"  Existing Score:  {entry['existing_score']}")
+                if 'score_difference' in result_data:
+                    diff = result_data['score_difference']
+                    print(f"  Difference:      {diff:+.1f} ({'higher' if diff > 0 else 'lower'})")
+            else:
+                print(f"  Error: {assessment.get('error', 'Unknown')}")
+                log_error_result(logger, "Batch entry failed", result_data)
+
+            # Small delay to avoid rate limiting
+            time.sleep(1)
+        except Exception as e:
+            logger.exception("Unhandled error while processing batch entry %s", entry['name'])
+            result_data = {
+                'index': i,
+                'name': entry['name'],
+                'url': entry['url'],
+                'existing_score': entry['existing_score'],
+                'is_xobin': entry['is_xobin'],
+                'error': str(e),
+                'error_stage': 'process_entry',
+                'error_type': type(e).__name__,
+                'error_context': {'audio_path': audio_path},
+            }
+            with open(result_path, 'w') as f:
+                json.dump(result_data, f, indent=2)
+            results.append(result_data)
 
     # Generate final comparison report
     print(f"\n{'='*60}")
@@ -508,10 +422,18 @@ def main():
 
     successful = [r for r in results if 'openai_final_score' in r]
     failed = [r for r in results if 'openai_final_score' not in r]
+    failure_reasons = {}
+    for item in failed:
+        reason = item.get('error', item.get('assessment', {}).get('error', 'Unknown error'))
+        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
 
     print(f"\nProcessed: {len(results)}")
     print(f"Successful: {len(successful)}")
     print(f"Failed: {len(failed)}")
+    if failure_reasons:
+        print("\nFailure reasons:")
+        for reason, count in sorted(failure_reasons.items(), key=lambda pair: (-pair[1], pair[0])):
+            print(f"  {count}: {reason}")
 
     if successful:
         # Calculate statistics
@@ -553,6 +475,7 @@ def main():
         'total_processed': len(results),
         'successful': len(successful),
         'failed': len(failed),
+        'failure_reasons': failure_reasons,
         'results': results
     }
 
@@ -572,4 +495,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logger.exception("Batch pronunciation assessment crashed")
+        raise

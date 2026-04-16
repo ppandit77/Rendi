@@ -85,7 +85,7 @@ def get_records_needing_assessment(table, batch_size=None, field_exists=True):
         return results
 
     except Exception as e:
-        logger.error(f"Error fetching records: {e}")
+        logger.exception("Error fetching records")
         return []
 
 
@@ -123,5 +123,5 @@ def update_airtable_score(table, record_id: str, score: float, has_existing_scor
         logger.info("Successfully updated Airtable record")
         return True
     except Exception as e:
-        logger.error(f"Error updating Airtable: {e}")
+        logger.exception("Error updating Airtable")
         return False

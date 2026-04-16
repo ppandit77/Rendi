@@ -4,11 +4,18 @@ import time
 import sys
 from dotenv import load_dotenv
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from src.utils.logging_utils import setup_logging
+
 load_dotenv()
 
 RENDI_API_URL = "https://api.rendi.dev/v1/run-ffmpeg-command"
 RENDI_STATUS_URL = "https://api.rendi.dev/v1/commands"
 RENDI_API_KEY = os.getenv("RENDI_API_KEY")
+logger = setup_logging(__name__)
 
 
 def extract_audio(video_url: str, api_key: str | None = None, output_file: str = "output.wav") -> str:
@@ -40,12 +47,12 @@ def extract_audio(video_url: str, api_key: str | None = None, output_file: str =
     }
 
     # Submit job
-    print(f"Submitting job to Rendi API...")
+    logger.info("Submitting job to Rendi API")
     response = requests.post(RENDI_API_URL, json=payload, headers=headers)
     response.raise_for_status()
     job_data = response.json()
     command_id = job_data.get("command_id")
-    print(f"Job submitted. Command ID: {command_id}")
+    logger.info("Job submitted. Command ID: %s", command_id)
 
     # Poll for completion
     status_url = f"{RENDI_STATUS_URL}/{command_id}"
@@ -55,7 +62,7 @@ def extract_audio(video_url: str, api_key: str | None = None, output_file: str =
         status_data = status_response.json()
         status = status_data.get("status")
 
-        print(f"Status: {status}")
+        logger.info("Status: %s", status)
 
         if status == "SUCCESS":
             break
@@ -79,7 +86,7 @@ def extract_audio(video_url: str, api_key: str | None = None, output_file: str =
     if not download_url:
         raise Exception("Output file URL not found in response")
 
-    print(f"Downloading audio from: {download_url}")
+    logger.info("Downloading audio from generated URL")
 
     audio_response = requests.get(download_url)
     audio_response.raise_for_status()
@@ -87,7 +94,7 @@ def extract_audio(video_url: str, api_key: str | None = None, output_file: str =
     with open(output_file, "wb") as f:
         f.write(audio_response.content)
 
-    print(f"Audio saved to: {output_file}")
+    logger.info("Audio saved to: %s", output_file)
     return output_file
 
 
@@ -100,4 +107,8 @@ if __name__ == "__main__":
     video_url = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else "output.wav"
 
-    extract_audio(video_url, output_file=output_file)
+    try:
+        extract_audio(video_url, output_file=output_file)
+    except Exception:
+        logger.exception("Audio extraction failed for %s", video_url)
+        raise

@@ -6,9 +6,11 @@ Uses OpenAI's multimodal model to assess pronunciation from audio files.
 
 import base64
 import json
+import logging
 from openai import OpenAI
 
 from ..config import OPENAI_API_KEY
+from ..utils.logging_utils import build_error_result
 
 
 ASSESSMENT_PROMPT = """You are an expert pronunciation assessor and speech language pathologist. Analyze this audio recording and provide a detailed pronunciation assessment.
@@ -62,6 +64,9 @@ IMPORTANT:
 - Be specific in assessment_notes about what the speaker does well and what needs work"""
 
 
+logger = logging.getLogger(__name__)
+
+
 def assess_pronunciation_openai(audio_file: str, language: str = "en-US", api_key: str = None) -> dict:
     """
     Perform pronunciation assessment using OpenAI GPT-4o.
@@ -82,8 +87,14 @@ def assess_pronunciation_openai(audio_file: str, language: str = "en-US", api_ke
     key = api_key or OPENAI_API_KEY
 
     if not key:
-        return {"error": "OpenAI API key not configured"}
+        return build_error_result(
+            "OpenAI API key not configured",
+            stage="configuration",
+            audio_file=audio_file,
+            language=language,
+        )
 
+    response_text = ""
     try:
         # Read and encode audio to base64
         with open(audio_file, "rb") as f:
@@ -141,12 +152,26 @@ def assess_pronunciation_openai(audio_file: str, language: str = "en-US", api_ke
         return result
 
     except json.JSONDecodeError as e:
-        return {
-            "error": f"Failed to parse GPT-4o response as JSON: {e}",
-            "raw_response": response_text
-        }
+        logger.error("Failed to parse GPT-4o response as JSON for %s: %s", audio_file, e)
+        error_result = build_error_result(
+            f"Failed to parse GPT-4o response as JSON: {e}",
+            error=e,
+            stage="parse_response",
+            audio_file=audio_file,
+            language=language,
+            raw_response=response_text,
+        )
+        error_result["raw_response"] = response_text
+        return error_result
     except Exception as e:
-        return {"error": str(e)}
+        logger.exception("OpenAI pronunciation assessment failed for %s", audio_file)
+        return build_error_result(
+            str(e),
+            error=e,
+            stage="openai_assessment",
+            audio_file=audio_file,
+            language=language,
+        )
 
 
 def print_assessment(assessment: dict):

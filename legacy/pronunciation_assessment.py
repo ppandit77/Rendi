@@ -16,12 +16,25 @@ Example:
     python pronunciation_assessment.py audio_1.wav en-US
 """
 
-import azure.cognitiveservices.speech as speechsdk
+try:
+    import azure.cognitiveservices.speech as speechsdk
+except ImportError:
+    speechsdk = None
 import sys
 import json
+import logging
 import os
 import time
 from dotenv import load_dotenv
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from src.utils.logging_utils import build_error_result, log_error_result, setup_logging
+
+
+logger = setup_logging(__name__)
 
 
 def assess_pronunciation_no_reference(
@@ -43,122 +56,150 @@ def assess_pronunciation_no_reference(
     Returns:
         Dictionary containing pronunciation assessment results
     """
-    # Configure speech service
-    speech_config = speechsdk.SpeechConfig(
-        subscription=speech_key,
-        region=speech_region
-    )
-    speech_config.speech_recognition_language = language
+    if speechsdk is None:
+        return build_error_result(
+            "azure-cognitiveservices-speech is not installed",
+            stage="configuration",
+            audio_file=audio_file,
+            language=language,
+        )
 
-    # Configure audio input from file
-    audio_config = speechsdk.audio.AudioConfig(filename=audio_file)
+    try:
+        # Configure speech service
+        speech_config = speechsdk.SpeechConfig(
+            subscription=speech_key,
+            region=speech_region
+        )
+        speech_config.speech_recognition_language = language
 
-    # Configure pronunciation assessment WITHOUT reference text
-    # This enables "unreferenced" assessment mode
-    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
-        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
-        granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
-    )
+        # Configure audio input from file
+        audio_config = speechsdk.audio.AudioConfig(filename=audio_file)
 
-    # Enable prosody assessment (rhythm, stress, intonation)
-    pronunciation_config.enable_prosody_assessment()
+        # Configure pronunciation assessment WITHOUT reference text
+        # This enables "unreferenced" assessment mode
+        pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+            grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+            granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme
+        )
 
-    # Create speech recognizer
-    speech_recognizer = speechsdk.SpeechRecognizer(
-        speech_config=speech_config,
-        audio_config=audio_config
-    )
+        # Enable prosody assessment (rhythm, stress, intonation)
+        pronunciation_config.enable_prosody_assessment()
 
-    # Apply pronunciation assessment config
-    pronunciation_config.apply_to(speech_recognizer)
+        # Create speech recognizer
+        speech_recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config
+        )
 
-    # Storage for results
-    all_words = []
-    all_scores = []
-    all_text = []
-    done = False
-    error_message = None
+        # Apply pronunciation assessment config
+        pronunciation_config.apply_to(speech_recognizer)
 
-    def on_recognized(evt):
-        if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            pronunciation_result = speechsdk.PronunciationAssessmentResult(evt.result)
+        # Storage for results
+        all_words = []
+        all_scores = []
+        all_text = []
+        done = False
+        error_message = None
 
-            segment_scores = {
-                "accuracy": pronunciation_result.accuracy_score,
-                "fluency": pronunciation_result.fluency_score,
-                "pronunciation": pronunciation_result.pronunciation_score,
-            }
+        def on_recognized(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                pronunciation_result = speechsdk.PronunciationAssessmentResult(evt.result)
 
-            # Try to get prosody score
-            try:
-                segment_scores["prosody"] = pronunciation_result.prosody_score
-            except AttributeError:
-                pass
-
-            all_scores.append(segment_scores)
-            all_text.append(evt.result.text)
-
-            # Get word-level details
-            for word in pronunciation_result.words:
-                word_info = {
-                    "word": word.word,
-                    "accuracy_score": word.accuracy_score,
-                    "error_type": str(word.error_type) if hasattr(word, 'error_type') else "None"
+                segment_scores = {
+                    "accuracy": pronunciation_result.accuracy_score,
+                    "fluency": pronunciation_result.fluency_score,
+                    "pronunciation": pronunciation_result.pronunciation_score,
                 }
-                all_words.append(word_info)
 
-    def on_session_stopped(evt):
-        nonlocal done
-        done = True
+                # Try to get prosody score
+                try:
+                    segment_scores["prosody"] = pronunciation_result.prosody_score
+                except AttributeError:
+                    pass
 
-    def on_canceled(evt):
-        nonlocal done, error_message
-        done = True
-        if evt.result.reason == speechsdk.ResultReason.Canceled:
-            cancellation = evt.result.cancellation_details
-            if cancellation.reason == speechsdk.CancellationReason.Error:
-                error_message = f"Error: {cancellation.error_details}"
+                all_scores.append(segment_scores)
+                all_text.append(evt.result.text)
 
-    # Connect event handlers
-    speech_recognizer.recognized.connect(on_recognized)
-    speech_recognizer.session_stopped.connect(on_session_stopped)
-    speech_recognizer.canceled.connect(on_canceled)
+                # Get word-level details
+                for word in pronunciation_result.words:
+                    word_info = {
+                        "word": word.word,
+                        "accuracy_score": word.accuracy_score,
+                        "error_type": str(word.error_type) if hasattr(word, 'error_type') else "None"
+                    }
+                    all_words.append(word_info)
 
-    print(f"Analyzing pronunciation for: {audio_file}")
-    print(f"Language: {language}")
-    print("Processing... (this may take a moment for longer audio)")
-    print("-" * 50)
+        def on_session_stopped(evt):
+            nonlocal done
+            done = True
 
-    # Start continuous recognition for full audio
-    speech_recognizer.start_continuous_recognition()
+        def on_canceled(evt):
+            nonlocal done, error_message
+            done = True
+            if evt.result.reason == speechsdk.ResultReason.Canceled:
+                cancellation = evt.result.cancellation_details
+                if cancellation.reason == speechsdk.CancellationReason.Error:
+                    error_message = f"Error: {cancellation.error_details}"
 
-    # Wait for completion
-    while not done:
-        time.sleep(0.5)
+        # Connect event handlers
+        speech_recognizer.recognized.connect(on_recognized)
+        speech_recognizer.session_stopped.connect(on_session_stopped)
+        speech_recognizer.canceled.connect(on_canceled)
 
-    speech_recognizer.stop_continuous_recognition()
+        print(f"Analyzing pronunciation for: {audio_file}")
+        print(f"Language: {language}")
+        print("Processing... (this may take a moment for longer audio)")
+        print("-" * 50)
 
-    # Check for errors
-    if error_message:
-        return {"error": error_message}
+        # Start continuous recognition for full audio
+        speech_recognizer.start_continuous_recognition()
 
-    if not all_scores:
-        return {"error": "No speech could be recognized in the audio"}
+        # Wait for completion
+        while not done:
+            time.sleep(0.5)
 
-    # Calculate average scores
-    avg_scores = {}
-    score_keys = ["accuracy", "fluency", "pronunciation", "prosody"]
-    for key in score_keys:
-        values = [s[key] for s in all_scores if key in s]
-        if values:
-            avg_scores[key] = sum(values) / len(values)
+        speech_recognizer.stop_continuous_recognition()
 
-    return {
-        "transcription": " ".join(all_text),
-        "scores": avg_scores,
-        "words": all_words,
-        "segment_count": len(all_scores)
-    }
+        # Check for errors
+        if error_message:
+            return build_error_result(
+                error_message,
+                stage="azure_recognition",
+                audio_file=audio_file,
+                language=language,
+            )
+
+        if not all_scores:
+            return build_error_result(
+                "No speech could be recognized in the audio",
+                stage="azure_recognition",
+                audio_file=audio_file,
+                language=language,
+            )
+
+        # Calculate average scores
+        avg_scores = {}
+        score_keys = ["accuracy", "fluency", "pronunciation", "prosody"]
+        for key in score_keys:
+            values = [s[key] for s in all_scores if key in s]
+            if values:
+                avg_scores[key] = sum(values) / len(values)
+
+        return {
+            "transcription": " ".join(all_text),
+            "scores": avg_scores,
+            "words": all_words,
+            "segment_count": len(all_scores)
+        }
+    except Exception as e:
+        logger.exception("Legacy Azure assessment failed for %s", audio_file)
+        return build_error_result(
+            str(e),
+            error=e,
+            stage="azure_assessment",
+            audio_file=audio_file,
+            language=language,
+        )
 
 
 def print_assessment(assessment: dict):
@@ -202,51 +243,67 @@ def print_assessment(assessment: dict):
 
 
 if __name__ == "__main__":
-    # Load environment variables from .env file
-    load_dotenv()
+    try:
+        # Load environment variables from .env file
+        load_dotenv()
 
-    # Azure Speech credentials from environment
-    SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
-    SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "eastus")
+        # Azure Speech credentials from environment
+        SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
+        SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "eastus")
 
-    if len(sys.argv) < 2:
-        print(__doc__)
-        print("\nUsage: python pronunciation_assessment.py <audio_file> [language]")
-        print("\nExamples:")
-        print("  python pronunciation_assessment.py audio_1.wav")
-        print("  python pronunciation_assessment.py audio_1.wav en-US")
-        print("  python pronunciation_assessment.py interview.wav en-GB")
-        sys.exit(1)
+        if len(sys.argv) < 2:
+            print(__doc__)
+            print("\nUsage: python pronunciation_assessment.py <audio_file> [language]")
+            print("\nExamples:")
+            print("  python pronunciation_assessment.py audio_1.wav")
+            print("  python pronunciation_assessment.py audio_1.wav en-US")
+            print("  python pronunciation_assessment.py interview.wav en-GB")
+            sys.exit(1)
 
-    audio_file = sys.argv[1]
-    language = sys.argv[2] if len(sys.argv) > 2 else "en-US"
+        audio_file = sys.argv[1]
+        language = sys.argv[2] if len(sys.argv) > 2 else "en-US"
 
-    if not SPEECH_KEY:
-        print("ERROR: AZURE_SPEECH_KEY not found in environment variables")
-        print("\nTo set credentials:")
-        print("1. Create a .env file in the project directory")
-        print("2. Add: AZURE_SPEECH_KEY=your_key_here")
-        print("3. Add: AZURE_SPEECH_REGION=eastus")
-        sys.exit(1)
+        if not SPEECH_KEY:
+            print("ERROR: AZURE_SPEECH_KEY not found in environment variables")
+            print("\nTo set credentials:")
+            print("1. Create a .env file in the project directory")
+            print("2. Add: AZURE_SPEECH_KEY=your_key_here")
+            print("3. Add: AZURE_SPEECH_REGION=eastus")
+            sys.exit(1)
 
-    # Check if file exists
-    if not os.path.exists(audio_file):
-        print(f"ERROR: Audio file not found: {audio_file}")
-        sys.exit(1)
+        # Check if file exists
+        if not os.path.exists(audio_file):
+            print(f"ERROR: Audio file not found: {audio_file}")
+            sys.exit(1)
 
-    # Perform assessment
-    result = assess_pronunciation_no_reference(
-        audio_file=audio_file,
-        speech_key=SPEECH_KEY,
-        speech_region=SPEECH_REGION,
-        language=language
-    )
+        # Perform assessment
+        result = assess_pronunciation_no_reference(
+            audio_file=audio_file,
+            speech_key=SPEECH_KEY,
+            speech_region=SPEECH_REGION,
+            language=language
+        )
 
-    # Display results
-    print_assessment(result)
+        # Display results
+        print_assessment(result)
+        if "error" in result:
+            log_error_result(
+                logger,
+                "Legacy Azure assessment failed",
+                {
+                    "error": result.get("error", "Unknown error"),
+                    "error_stage": result.get("error_stage", "assessment"),
+                    "error_type": result.get("error_type", "AssessmentError"),
+                    "error_context": result.get("error_context", {"audio_file": audio_file, "language": language}),
+                },
+                level=logging.INFO,
+            )
 
-    # Save JSON output
-    output_json = audio_file.rsplit(".", 1)[0] + "_assessment.json"
-    with open(output_json, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"\nResults saved to: {output_json}")
+        # Save JSON output
+        output_json = audio_file.rsplit(".", 1)[0] + "_assessment.json"
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\nResults saved to: {output_json}")
+    except Exception:
+        logger.exception("Legacy Azure assessment script crashed")
+        raise

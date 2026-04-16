@@ -93,5 +93,5 @@ def ensure_field_exists(api) -> bool:
             return False
 
     except Exception as e:
-        logger.error(f"Error checking/creating field: {e}")
+        logger.exception("Error checking/creating field")
         return False

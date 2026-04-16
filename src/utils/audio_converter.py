@@ -11,12 +11,13 @@ import requests
 import logging
 
 from ..config import RENDI_API_KEY, RENDI_API_URL, RENDI_STATUS_URL
+from .logging_utils import build_error_result
 
 
 logger = logging.getLogger(__name__)
 
 
-def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool:
+def convert_video_to_audio_rendi_with_details(video_url: str, output_audio_path: str) -> dict:
     """
     Convert video to audio using Rendi API (FFmpeg-as-a-service).
 
@@ -25,11 +26,20 @@ def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool
         output_audio_path: Path to save the output audio file
 
     Returns:
-        True if conversion succeeded, False otherwise
+        Dict containing success flag and diagnostic details
     """
     if not RENDI_API_KEY:
-        logger.error("RENDI_API_KEY not configured")
-        return False
+        error_result = build_error_result(
+            "RENDI_API_KEY not configured",
+            stage="configuration",
+            video_url=video_url,
+            output_audio_path=output_audio_path,
+        )
+        logger.error(error_result["error"])
+        return {"ok": False, **error_result}
+
+    command_id = None
+    status = None
 
     try:
         headers = {
@@ -56,8 +66,15 @@ def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool
         command_id = job_data.get("command_id")
 
         if not command_id:
-            logger.error("No command_id returned from Rendi")
-            return False
+            error_result = build_error_result(
+                "No command_id returned from Rendi",
+                stage="submit_job",
+                video_url=video_url,
+                output_audio_path=output_audio_path,
+                job_response=job_data,
+            )
+            logger.error(error_result["error"])
+            return {"ok": False, **error_result}
 
         logger.info(f"Rendi job started: {command_id}")
 
@@ -76,14 +93,32 @@ def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool
                 out_file_info = output_files.get("out_1")
 
                 if not out_file_info:
-                    logger.error("No output file in Rendi response")
-                    return False
+                    error_result = build_error_result(
+                        "No output file in Rendi response",
+                        stage="poll_status",
+                        video_url=video_url,
+                        output_audio_path=output_audio_path,
+                        command_id=command_id,
+                        status=status,
+                        status_response=status_data,
+                    )
+                    logger.error(error_result["error"])
+                    return {"ok": False, **error_result}
 
                 download_url = out_file_info.get("storage_url") if isinstance(out_file_info, dict) else out_file_info
 
                 if not download_url:
-                    logger.error("No download URL found")
-                    return False
+                    error_result = build_error_result(
+                        "No download URL found",
+                        stage="poll_status",
+                        video_url=video_url,
+                        output_audio_path=output_audio_path,
+                        command_id=command_id,
+                        status=status,
+                        status_response=status_data,
+                    )
+                    logger.error(error_result["error"])
+                    return {"ok": False, **error_result}
 
                 audio_response = requests.get(download_url, timeout=60)
                 audio_response.raise_for_status()
@@ -92,27 +127,80 @@ def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool
                     f.write(audio_response.content)
 
                 logger.info(f"Audio saved: {output_audio_path}")
-                return True
+                return {
+                    "ok": True,
+                    "command_id": command_id,
+                    "status": status,
+                    "download_url": download_url,
+                    "output_audio_path": output_audio_path,
+                }
 
             elif status == "FAILED":
                 error = status_data.get("error", "Unknown error")
-                logger.error(f"Rendi job failed: {error}")
-                return False
+                error_result = build_error_result(
+                    f"Rendi job failed: {error}",
+                    stage="poll_status",
+                    video_url=video_url,
+                    output_audio_path=output_audio_path,
+                    command_id=command_id,
+                    status=status,
+                    status_response=status_data,
+                )
+                logger.error(error_result["error"])
+                return {"ok": False, **error_result}
 
             logger.debug(f"Status: {status}...")
 
-        logger.error("Rendi job timed out")
-        return False
+        error_result = build_error_result(
+            "Rendi job timed out",
+            stage="poll_status",
+            video_url=video_url,
+            output_audio_path=output_audio_path,
+            command_id=command_id,
+            status=status,
+            poll_attempts=60,
+        )
+        logger.error(error_result["error"])
+        return {"ok": False, **error_result}
 
     except requests.exceptions.HTTPError as e:
-        logger.error(f"Rendi API HTTP error: {e}")
-        return False
+        logger.exception("Rendi API HTTP error")
+        return {
+            "ok": False,
+            **build_error_result(
+                f"Rendi API HTTP error: {e}",
+                error=e,
+                stage="submit_or_poll_http",
+                video_url=video_url,
+                output_audio_path=output_audio_path,
+                command_id=command_id,
+                status=status,
+            ),
+        }
     except Exception as e:
-        logger.error(f"Error with Rendi API: {e}")
-        return False
+        logger.exception("Error with Rendi API")
+        return {
+            "ok": False,
+            **build_error_result(
+                f"Error with Rendi API: {e}",
+                error=e,
+                stage="submit_or_poll",
+                video_url=video_url,
+                output_audio_path=output_audio_path,
+                command_id=command_id,
+                status=status,
+            ),
+        }
 
 
-def convert_video_to_audio_local(video_path: str, output_audio_path: str) -> bool:
+def convert_video_to_audio_rendi(video_url: str, output_audio_path: str) -> bool:
+    """
+    Backward-compatible bool wrapper around the detailed Rendi conversion API.
+    """
+    return convert_video_to_audio_rendi_with_details(video_url, output_audio_path)["ok"]
+
+
+def convert_video_to_audio_local_with_details(video_path: str, output_audio_path: str) -> dict:
     """
     Convert video to audio using local FFmpeg.
 
@@ -121,7 +209,7 @@ def convert_video_to_audio_local(video_path: str, output_audio_path: str) -> boo
         output_audio_path: Path to save the output audio file
 
     Returns:
-        True if conversion succeeded, False otherwise
+        Dict containing success flag and diagnostic details
     """
     try:
         result = subprocess.run([
@@ -132,20 +220,62 @@ def convert_video_to_audio_local(video_path: str, output_audio_path: str) -> boo
 
         if result.returncode == 0:
             logger.info(f"Audio converted: {output_audio_path}")
-            return True
+            return {"ok": True, "output_audio_path": output_audio_path, "video_path": video_path}
         else:
             logger.error(f"FFmpeg error: {result.stderr[:200]}")
-            return False
+            return {
+                "ok": False,
+                **build_error_result(
+                    "FFmpeg conversion failed",
+                    stage="local_ffmpeg",
+                    video_path=video_path,
+                    output_audio_path=output_audio_path,
+                    returncode=result.returncode,
+                    stderr=result.stderr[:1000],
+                ),
+            }
 
     except subprocess.TimeoutExpired:
         logger.error("FFmpeg conversion timed out")
-        return False
+        return {
+            "ok": False,
+            **build_error_result(
+                "FFmpeg conversion timed out",
+                stage="local_ffmpeg",
+                video_path=video_path,
+                output_audio_path=output_audio_path,
+            ),
+        }
     except FileNotFoundError:
         logger.error("FFmpeg not found. Please install FFmpeg.")
-        return False
+        return {
+            "ok": False,
+            **build_error_result(
+                "FFmpeg not found. Please install FFmpeg.",
+                stage="local_ffmpeg",
+                video_path=video_path,
+                output_audio_path=output_audio_path,
+            ),
+        }
     except Exception as e:
-        logger.error(f"Error in local conversion: {e}")
-        return False
+        logger.exception("Error in local conversion")
+        return {
+            "ok": False,
+            **build_error_result(
+                f"Error in local conversion: {e}",
+                error=e,
+                stage="local_ffmpeg",
+                video_path=video_path,
+                output_audio_path=output_audio_path,
+            ),
+        }
+
+
+def convert_video_to_audio_local(video_path: str, output_audio_path: str) -> bool:
+    """
+    Backward-compatible bool wrapper around the detailed local conversion API.
+    """
+    return convert_video_to_audio_local_with_details(video_path, output_audio_path)["ok"]
 
 
 def download_video(url: str, output_path: str) -> bool:

@@ -19,10 +19,20 @@ Example:
 
 import base64
 import json
+import logging
 import os
 import sys
 from dotenv import load_dotenv
 from openai import OpenAI
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from src.utils.logging_utils import build_error_result, log_error_result, setup_logging
+
+
+logger = setup_logging(__name__)
 
 
 ASSESSMENT_PROMPT = """You are an expert pronunciation assessor and speech language pathologist. Analyze this audio recording and provide a detailed pronunciation assessment.
@@ -92,61 +102,54 @@ def assess_pronunciation_openai(
     Returns:
         Dictionary containing pronunciation assessment results
     """
-    # Read and encode audio file to base64
-    with open(audio_file, "rb") as f:
-        audio_data = f.read()
-
-    audio_base64 = base64.standard_b64encode(audio_data).decode("utf-8")
-
-    # Determine MIME type based on file extension
-    ext = audio_file.lower().rsplit(".", 1)[-1]
-    mime_types = {
-        "wav": "audio/wav",
-        "mp3": "audio/mpeg",
-        "m4a": "audio/mp4",
-        "ogg": "audio/ogg",
-        "flac": "audio/flac"
-    }
-    mime_type = mime_types.get(ext, "audio/wav")
-
-    # Initialize OpenAI client
-    client = OpenAI(api_key=api_key)
-
-    print(f"Analyzing pronunciation for: {audio_file}")
-    print(f"Language: {language}")
-    print("Processing with GPT-4o... (this may take a moment)")
-    print("-" * 50)
-
-    # Create the message with audio input
-    response = client.chat.completions.create(
-        model="gpt-4o-audio-preview",
-        modalities=["text"],
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": ASSESSMENT_PROMPT.format(language=language)
-                    },
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": ext if ext in ["wav", "mp3"] else "wav"
-                        }
-                    }
-                ]
-            }
-        ],
-        temperature=0.3
-    )
-
-    # Extract the response content
-    response_text = response.choices[0].message.content
-
-    # Parse JSON from response
+    response_text = ""
     try:
+        # Read and encode audio file to base64
+        with open(audio_file, "rb") as f:
+            audio_data = f.read()
+
+        audio_base64 = base64.standard_b64encode(audio_data).decode("utf-8")
+
+        # Determine MIME type based on file extension
+        ext = audio_file.lower().rsplit(".", 1)[-1]
+
+        # Initialize OpenAI client
+        client = OpenAI(api_key=api_key)
+
+        print(f"Analyzing pronunciation for: {audio_file}")
+        print(f"Language: {language}")
+        print("Processing with GPT-4o... (this may take a moment)")
+        print("-" * 50)
+
+        # Create the message with audio input
+        response = client.chat.completions.create(
+            model="gpt-4o-audio-preview",
+            modalities=["text"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": ASSESSMENT_PROMPT.format(language=language)
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_base64,
+                                "format": ext if ext in ["wav", "mp3"] else "wav"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0.3
+        )
+
+        # Extract the response content
+        response_text = response.choices[0].message.content
+
+        # Parse JSON from response
         # Clean up response if it has markdown code blocks
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0]
@@ -156,10 +159,26 @@ def assess_pronunciation_openai(
         result = json.loads(response_text.strip())
         return result
     except json.JSONDecodeError as e:
-        return {
-            "error": f"Failed to parse GPT-4o response as JSON: {e}",
-            "raw_response": response_text
-        }
+        logger.error("Failed to parse GPT-4o response as JSON for %s: %s", audio_file, e)
+        error_result = build_error_result(
+            f"Failed to parse GPT-4o response as JSON: {e}",
+            error=e,
+            stage="parse_response",
+            audio_file=audio_file,
+            language=language,
+            raw_response=response_text,
+        )
+        error_result["raw_response"] = response_text
+        return error_result
+    except Exception as e:
+        logger.exception("Legacy OpenAI assessment failed for %s", audio_file)
+        return build_error_result(
+            str(e),
+            error=e,
+            stage="openai_assessment",
+            audio_file=audio_file,
+            language=language,
+        )
 
 
 def print_assessment(assessment: dict):
@@ -209,48 +228,64 @@ def print_assessment(assessment: dict):
 
 
 if __name__ == "__main__":
-    # Load environment variables from .env file
-    load_dotenv()
+    try:
+        # Load environment variables from .env file
+        load_dotenv()
 
-    # OpenAI API key from environment
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+        # OpenAI API key from environment
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-    if len(sys.argv) < 2:
-        print(__doc__)
-        print("\nUsage: python openai_pronunciation_assessment.py <audio_file> [language]")
-        print("\nExamples:")
-        print("  python openai_pronunciation_assessment.py audio_1.wav")
-        print("  python openai_pronunciation_assessment.py audio_1.wav en-US")
-        print("  python openai_pronunciation_assessment.py interview.wav en-GB")
-        sys.exit(1)
+        if len(sys.argv) < 2:
+            print(__doc__)
+            print("\nUsage: python openai_pronunciation_assessment.py <audio_file> [language]")
+            print("\nExamples:")
+            print("  python openai_pronunciation_assessment.py audio_1.wav")
+            print("  python openai_pronunciation_assessment.py audio_1.wav en-US")
+            print("  python openai_pronunciation_assessment.py interview.wav en-GB")
+            sys.exit(1)
 
-    audio_file = sys.argv[1]
-    language = sys.argv[2] if len(sys.argv) > 2 else "en-US"
+        audio_file = sys.argv[1]
+        language = sys.argv[2] if len(sys.argv) > 2 else "en-US"
 
-    if not OPENAI_API_KEY:
-        print("ERROR: OPENAI_API_KEY not found in environment variables")
-        print("\nTo set credentials:")
-        print("1. Create a .env file in the project directory")
-        print("2. Add: OPENAI_API_KEY=your_key_here")
-        sys.exit(1)
+        if not OPENAI_API_KEY:
+            print("ERROR: OPENAI_API_KEY not found in environment variables")
+            print("\nTo set credentials:")
+            print("1. Create a .env file in the project directory")
+            print("2. Add: OPENAI_API_KEY=your_key_here")
+            sys.exit(1)
 
-    # Check if file exists
-    if not os.path.exists(audio_file):
-        print(f"ERROR: Audio file not found: {audio_file}")
-        sys.exit(1)
+        # Check if file exists
+        if not os.path.exists(audio_file):
+            print(f"ERROR: Audio file not found: {audio_file}")
+            sys.exit(1)
 
-    # Perform assessment
-    result = assess_pronunciation_openai(
-        audio_file=audio_file,
-        api_key=OPENAI_API_KEY,
-        language=language
-    )
+        # Perform assessment
+        result = assess_pronunciation_openai(
+            audio_file=audio_file,
+            api_key=OPENAI_API_KEY,
+            language=language
+        )
 
-    # Display results
-    print_assessment(result)
+        # Display results
+        print_assessment(result)
+        if "error" in result:
+            log_error_result(
+                logger,
+                "Legacy OpenAI assessment failed",
+                {
+                    "error": result.get("error", "Unknown error"),
+                    "error_stage": result.get("error_stage", "assessment"),
+                    "error_type": result.get("error_type", "AssessmentError"),
+                    "error_context": result.get("error_context", {"audio_file": audio_file, "language": language}),
+                },
+                level=logging.INFO,
+            )
 
-    # Save JSON output
-    output_json = audio_file.rsplit(".", 1)[0] + "_openai_assessment.json"
-    with open(output_json, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"\nResults saved to: {output_json}")
+        # Save JSON output
+        output_json = audio_file.rsplit(".", 1)[0] + "_openai_assessment.json"
+        with open(output_json, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\nResults saved to: {output_json}")
+    except Exception:
+        logger.exception("Legacy OpenAI assessment script crashed")
+        raise
