@@ -1,4 +1,5 @@
 azure-cognitiveservices-speech
+dspy-ai
 openai
 pyairtable
 python-dotenv

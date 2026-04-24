@@ -16,6 +16,51 @@ from .logging_utils import build_error_result
 
 logger = logging.getLogger(__name__)
 
+MAX_HTTP_RETRIES = 3
+HTTP_RETRY_DELAYS = [1, 2, 4]  # Exponential backoff in seconds
+
+
+def _request_with_retry(method: str, url: str, max_retries: int = MAX_HTTP_RETRIES, **kwargs) -> requests.Response:
+    """
+    Make an HTTP request with retry logic for transient failures.
+
+    Args:
+        method: HTTP method ('get' or 'post')
+        url: Request URL
+        max_retries: Maximum number of retry attempts
+        **kwargs: Additional arguments passed to requests
+
+    Returns:
+        requests.Response object
+
+    Raises:
+        requests.exceptions.RequestException: If all retries fail
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            if method.lower() == 'get':
+                response = requests.get(url, **kwargs)
+            else:
+                response = requests.post(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = HTTP_RETRY_DELAYS[attempt]
+                logger.warning("HTTP %s to %s failed (attempt %d/%d), retrying in %ds: %s",
+                               method.upper(), url[:60], attempt + 1, max_retries, delay, e)
+                time.sleep(delay)
+            else:
+                logger.error("HTTP %s to %s failed after %d attempts: %s",
+                             method.upper(), url[:60], max_retries, e)
+                raise
+        except requests.exceptions.HTTPError:
+            # Don't retry HTTP errors (4xx, 5xx) - re-raise immediately
+            raise
+    raise last_error
+
 
 def convert_video_to_audio_rendi_with_details(video_url: str, output_audio_path: str) -> dict:
     """
@@ -58,10 +103,9 @@ def convert_video_to_audio_rendi_with_details(video_url: str, output_audio_path:
             "ffmpeg_command": "-i {{in_1}} -ar 16000 -ac 1 -acodec pcm_s16le {{out_1}}"
         }
 
-        # Submit job
+        # Submit job (with retry for transient errors)
         logger.info("Submitting to Rendi API...")
-        response = requests.post(RENDI_API_URL, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
+        response = _request_with_retry('post', RENDI_API_URL, json=payload, headers=headers, timeout=30)
         job_data = response.json()
         command_id = job_data.get("command_id")
 
@@ -82,8 +126,7 @@ def convert_video_to_audio_rendi_with_details(video_url: str, output_audio_path:
         status_url = f"{RENDI_STATUS_URL}/{command_id}"
         for _ in range(60):  # Max 5 minutes
             time.sleep(3)
-            status_response = requests.get(status_url, headers=headers, timeout=30)
-            status_response.raise_for_status()
+            status_response = _request_with_retry('get', status_url, headers=headers, timeout=30)
             status_data = status_response.json()
             status = status_data.get("status")
 
@@ -120,8 +163,7 @@ def convert_video_to_audio_rendi_with_details(video_url: str, output_audio_path:
                     logger.error(error_result["error"])
                     return {"ok": False, **error_result}
 
-                audio_response = requests.get(download_url, timeout=60)
-                audio_response.raise_for_status()
+                audio_response = _request_with_retry('get', download_url, timeout=60)
 
                 with open(output_audio_path, 'wb') as f:
                     f.write(audio_response.content)

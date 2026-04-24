@@ -64,13 +64,14 @@ def extract_error_result(result: dict, *, default_stage: str, **context) -> dict
     return error_result
 
 
-def process_pending_records(dry_run=False, batch_size=None):
+def process_pending_records(dry_run=False, batch_size=None, reprocess=False):
     """
     Main processing function.
 
     Args:
         dry_run: If True, don't update Airtable
         batch_size: Maximum records to process (None for all)
+        reprocess: If True, re-assess records that already have scores
     """
     # Verify configuration
     if not OPENAI_API_KEY:
@@ -93,6 +94,7 @@ def process_pending_records(dry_run=False, batch_size=None):
     logger.info("Airtable Pronunciation Assessment Cron")
     logger.info(f"Started at: {datetime.now().isoformat()}")
     logger.info(f"Dry run: {dry_run}")
+    logger.info(f"Reprocess mode: {reprocess}")
     logger.info("=" * 60)
 
     # Connect to Airtable
@@ -102,7 +104,7 @@ def process_pending_records(dry_run=False, batch_size=None):
     field_exists = ensure_field_exists(api)
 
     # Get records needing assessment
-    records = get_records_needing_assessment(table, batch_size, field_exists)
+    records = get_records_needing_assessment(table, batch_size, field_exists, reprocess=reprocess)
 
     if not records:
         logger.info("No records need assessment. Exiting.")
@@ -259,12 +261,18 @@ def main():
         default=None,
         help='Maximum number of records to process (default: all)'
     )
+    parser.add_argument(
+        '--reprocess',
+        action='store_true',
+        help='Re-assess records that already have Pronunciation Assessment Score (for prompt updates)'
+    )
 
     args = parser.parse_args()
 
     process_pending_records(
         dry_run=args.dry_run,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        reprocess=args.reprocess
     )
 
 

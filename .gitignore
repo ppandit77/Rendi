@@ -23,6 +23,9 @@ venv/
 data/audio/
 data/results/
 data/batch_assessment/
+data/reports/
+data/optimized_prompt.json
+fluency_scoring/data/
 
 # Temp files
 *.tmp

@@ -16,30 +16,38 @@ from ..config import (
 logger = logging.getLogger(__name__)
 
 
-def get_records_needing_assessment(table, batch_size=None, field_exists=True):
+def get_records_needing_assessment(table, batch_size=None, field_exists=True, reprocess=False):
     """
     Get records that need pronunciation assessment.
 
     Criteria:
     - Has video URL in 'Question 1 DO URL'
     - Does NOT have 'Pronunciation Assessment Score' (not yet processed by us)
+      OR reprocess=True to include already processed records
     - Created from Feb 1, 2026 onwards
 
     Args:
         table: Airtable Table object
         batch_size: Maximum number of records to return (None for all)
         field_exists: Whether the Pronunciation Assessment Score field exists
+        reprocess: If True, include records that already have scores (for re-assessment)
 
     Returns:
         List of dicts with record_id, video_url, existing_score, name
     """
     logger.info("Fetching records from Airtable...")
+    if reprocess:
+        logger.info("REPROCESS MODE: Including records with existing Pronunciation Assessment Score")
 
     # Build formula to filter records
-    # Records with video URL, no Pronunciation Assessment Score, created from Feb 1, 2026
+    # Records with video URL, created from Feb 1, 2026
     date_filter = "IS_AFTER({Created}, '2026-01-31')"
 
-    if field_exists:
+    if reprocess:
+        # Reprocess mode: get records WITH existing Pronunciation Assessment Score
+        # These are records we've already processed that need re-scoring with new prompt
+        formula = f"AND({{Question 1 DO URL}} != '', {{Pronunciation Assessment Score}} != '', {date_filter})"
+    elif field_exists:
         formula = f"AND({{Question 1 DO URL}} != '', {{Pronunciation Assessment Score}} = '', {date_filter})"
     else:
         # If field doesn't exist yet, just get records with video URL and date filter
